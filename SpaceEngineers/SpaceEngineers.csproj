@@ -53,6 +53,7 @@
     <Reference Include="SpaceEngineers.ObjectBuilders, processorArchitecture=AMD64">
       <HintPath>G:\SteamLibrary\steamapps\common\SpaceEngineers\Bin64\SpaceEngineers.ObjectBuilders.dll</HintPath>
     </Reference>
+    <Reference Include="netstandard" />
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
