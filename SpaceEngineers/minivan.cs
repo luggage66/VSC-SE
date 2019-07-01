@@ -34,103 +34,45 @@ LegsExtendedPositionAtConnectorHeight=0.1
 AnotherKey=Another value
 */
 
+// by Luggage66
+
 bool debugOutput = true;
 float DRIVING_WHEEL_OFFSET = -0.50f; 
 float CONNECTOR_WHEEL_OFFSET = 0.35f;
-
-float LEG_HEIGHT_UNLOCK = 1.0f;
+string STATUS_DISPLAY_NAME = "LCD 1";
  
-public void Log_Debug(string message) {
-    if (!debugOutput) return;
-    
-    var text = _textPanel.GetText();
-    text += "\n" + message;
-    var lines = text.Split('\n');
-    var truncatedText = string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 15)));
-
-    _textPanel.WriteText(_header + "\n" + truncatedText, false);
-    _textPanel.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
-}
-
-MyIni config;
-public Program()
-{
-    _textPanel = Me.GetSurface(0); //GetFirstBlock<IMyCockpit>().GetSurface(0); /
-    var ini = new MyIni();
-
-    MyIniParseResult result;
-    if (!ini.TryParse(Me.CustomData, out result)) 
-        throw new Exception(result.ToString());
-    ini.Get("global", "WheelOffsetRidingPosition").ToString();
-    // Runtime.UpdateFrequency = UpdateFrequency.Once | UpdateFrequency.Update100;
-    this.Log_Debug("Program()");
-}
-
-public void Save()
-{
-}
-
 public void Main(string argument, UpdateType updateSource)
 {
     if (argument != null) {
-        if (argument == "ride-normal") {
-            _stateMachine = this.SetModeNormal().GetEnumerator();
-            Runtime.UpdateFrequency = UpdateFrequency.Update100;
-        }
+        InitializePartReferences();
+        RegisterArgumentWorkflow(argument, "ride-normal", SetModeNormal);
+        RegisterArgumentWorkflow(argument, "ride-low", SetModeLow);
+        RegisterArgumentWorkflow(argument, "extend-gear", ExtendGear);
+        RegisterArgumentWorkflow(argument, "jack-up", JackUp);
 
-        if (argument == "ride-low") {
-            _stateMachine = this.FullLower().GetEnumerator();
-            Runtime.UpdateFrequency = UpdateFrequency.Update100;
-        }   
+        if (argument == "kill") {
+            KillStateMachine();
+        }
     }
 
     if ((updateSource & (UpdateType.Update100)) != 0)
     {
         RunStateMachine();
     }
-}
 
-string legPistonGroupName = "Leg Pistons";
-string landingGearGroupName = "Piston Landing Gear";
-IMyBlockGroup legPistons;
-IMyBlockGroup landingGear;
-private void InitializePartReferences() {
-    legPistons = GridTerminalSystem.GetBlockGroupWithName(legPistonGroupName);
-    landingGear = GridTerminalSystem.GetBlockGroupWithName(landingGearGroupName);
-}
-
-IEnumerator<bool> _stateMachine;
-public void RunStateMachine() {
-    
-    _header = "Running...";
-    if (_stateMachine != null) {
-        if (!_stateMachine.MoveNext() || !_stateMachine.Current) {
-  _stateMachine.Dispose();
-            _stateMachine = null;
-            this.Log_Debug("Disposed()");
-            Runtime.UpdateFrequency = UpdateFrequency.None;
-            _header = "Stopped.";
-        }
-    }
+    OutputConsoleBuffer();
 }
 
 public IEnumerable<bool> SetModeNormal() {
-    InitializePartReferences();
+    this.Log_Debug("Set Mode: Normal");
+    foreach (var x in RetractAndUnlock()) yield return x;
+    foreach (var x in SetRideHeight(DRIVING_WHEEL_OFFSET)) yield return x;
+}
 
-    this.Log_Debug("Disconnecting and Raising Legs.");   
-
-    foreach (bool x in RetractAndUnlock()) {
-        yield return x;
-    }
-
-    // 2. Release landing gear locks
-    this.Log_Debug("Unlocking Landing Gear.");
-    DoAll<IMyLandingGear>(landingGear, gear => gear.Unlock());
-
-    // 3. Extend Wheels
-    foreach (bool x in SetRideHeight(DRIVING_WHEEL_OFFSET)) {
-        yield return x;
-    }
+public IEnumerable<bool> SetModeLow() {
+    this.Log_Debug("Set Mode: Low");
+    foreach (var x in RetractAndUnlock()) yield return x;
+    foreach (var x in SetRideHeight(CONNECTOR_WHEEL_OFFSET)) yield return x;
 }
 
 public IEnumerable<bool> SetRideHeight(float desiredHeight = -0.5f) {
@@ -147,12 +89,12 @@ public IEnumerable<bool> SetRideHeight(float desiredHeight = -0.5f) {
 
     var offset = direction < 0 ? -0.1f : 0.1f;
 
-    this.Log_Debug("Max " + max.ToString());
-    this.Log_Debug("Min " + min.ToString());
-
+    AppendToConsole("");
     while (direction * sampleWheel.GetValue<float>("Height") < (direction * desiredHeight - float.Epsilon * direction)) {
+        ReplaceConsoleLine("Suspension: ");
         DoAll<IMyMotorSuspension>(susp => {
             var value = susp.GetValue<float>("Height");
+            ReplaceConsoleLine(GetLastConsoleLine() + " " + value.ToString());
             if (direction * value < direction * desiredHeight - float.Epsilon * direction) {
                 value += offset;
                 susp.SetValue("Height", value);
@@ -162,10 +104,75 @@ public IEnumerable<bool> SetRideHeight(float desiredHeight = -0.5f) {
     }
 }
 
-public IEnumerable<bool> RetractAndUnlock(float limit = 0f, float speed = 0.1f) {
-    var sampleWheel = GetFirstBlock<IMyMotorSuspension>();
+public IEnumerable<bool> ExtendGear() {
+    foreach (var x in ExtendToWheelHeightAndLock(GetPistonLengthForWheelPosition())) yield return x;
+}
+
+public IEnumerable<bool> JackUp() {
     var sampleLeg = GetFirstBlock<IMyPistonBase>(legPistons);
+    var legPosition = GetPositionFromDetailedInfo(sampleLeg.DetailedInfo);
+    var pistonLengthForWheelPosition = GetPistonLengthForWheelPosition();
+    if (legPosition < pistonLengthForWheelPosition - float.Epsilon) {
+        foreach (var x in ExtendToWheelHeightAndLock(GetPistonLengthForWheelPosition())) yield return x;
+    }
+    foreach (var x in ExtendToWheelHeightAndLock(2.0f)) yield return x;
+}
+
+public float GetPistonLengthForWheelPosition() {
+    var sampleWheel = GetFirstBlock<IMyMotorSuspension>();
     var wheelOffest = sampleWheel.GetValue<float>("Height");
+    return (-1 * wheelOffest + 0.5f);
+}
+
+public IEnumerable<bool> ExtendToWheelHeightAndLock(float limit = 0f, float speed = 0.1f) {
+    this.Log_Debug("Extending landing gear");
+
+    limit += 0.15f;
+
+    limit = Math.Min(2.0f, limit);
+    
+    var sampleLeg = GetFirstBlock<IMyPistonBase>(legPistons);    
+    var pistonLengthForWheelPosition = GetPistonLengthForWheelPosition();
+    var LEG_STUCK_DETECT_SPACING = 0.1f;
+
+    DoAll<IMyPistonBase>(legPistons, piston => {
+        piston.MaxLimit = limit;
+        piston.Velocity = speed;
+    });
+
+    var unlockPosition = 0f;
+    var legPosition = 2.0f;
+    var lastLegPosition = legPosition + LEG_STUCK_DETECT_SPACING * 2;
+
+    // wait for legs to retract to wheel height before unlocking
+    while (legPosition < limit - float.Epsilon) {
+        unlockPosition = pistonLengthForWheelPosition;
+        legPosition = GetPositionFromDetailedInfo(sampleLeg.DetailedInfo);
+
+        if (Math.Abs(legPosition - lastLegPosition) < LEG_STUCK_DETECT_SPACING) {
+            // unlock early, we may be stuck on ourselves.
+            this.Log_Debug("Warn: Gear Stuck, unlocking.");
+            DoAll<IMyLandingGear>(landingGear, gear => gear.Unlock());
+        }
+
+        lastLegPosition = legPosition;
+
+        yield return true;
+    }
+
+    DoAll<IMyLandingGear>(landingGear, gear => gear.AutoLock = true);
+    yield return true;
+    DoAll<IMyLandingGear>(landingGear, gear => gear.Lock());
+    yield return true;
+    DoAll<IMyLandingGear>(landingGear, gear => gear.AutoLock = false);
+    yield return true;
+}
+
+public IEnumerable<bool> RetractAndUnlock(float limit = 0f, float speed = 0.1f) {
+    this.Log_Debug("Retracting Landing Gear.");
+
+    var sampleLeg = GetFirstBlock<IMyPistonBase>(legPistons);
+    var pistonLengthForWheelPosition = GetPistonLengthForWheelPosition();
     var LEG_STUCK_DETECT_SPACING = 0.1f;
 
     DoAll<IMyShipConnector>(connector => connector.Disconnect());
@@ -176,14 +183,13 @@ public IEnumerable<bool> RetractAndUnlock(float limit = 0f, float speed = 0.1f) 
         piston.Velocity = speed * -1;
     });
 
-    var startingPosition = GetPositionFromDetailedInfo(sampleLeg.DetailedInfo);
     var unlockPosition = 0f;
     var legPosition = 2.0f;
     var lastLegPosition = legPosition + LEG_STUCK_DETECT_SPACING * 2;
 
     // wait for legs to retract to wheel height before unlocking
-    while (legPosition > unlockPosition) {
-        unlockPosition = (-1 * wheelOffest + 0.5f);
+    while (legPosition > unlockPosition + float.Epsilon) {
+        unlockPosition = pistonLengthForWheelPosition;
         legPosition = GetPositionFromDetailedInfo(sampleLeg.DetailedInfo);
 
         if (Math.Abs(legPosition - lastLegPosition) < LEG_STUCK_DETECT_SPACING) {
@@ -200,17 +206,47 @@ public IEnumerable<bool> RetractAndUnlock(float limit = 0f, float speed = 0.1f) 
     DoAll<IMyLandingGear>(landingGear, gear => gear.Unlock());
 }
 
-public IEnumerable<bool> FullLower() {
-    InitializePartReferences();
+private void RegisterArgumentWorkflow(string argument, string name, Func<IEnumerable<bool>> workflowFn) {
+    if (argument == name) {
+        CallWorkflow(workflowFn);
+    }
+}
 
-    this.Log_Debug("Retracting Legs.");
-    foreach (bool x in RetractAndUnlock()) {
-        yield return x;
+private void CallWorkflow(Func<IEnumerable<bool>> workflowFn) {
+    if (_stateMachine != null) {
+        return; // only one workflow at a time.
     }
 
-    foreach (bool x in SetRideHeight(CONNECTOR_WHEEL_OFFSET)) {
-        yield return x;
+    _stateMachine = workflowFn().GetEnumerator();
+    Runtime.UpdateFrequency = UpdateFrequency.Update100;
+}
+
+string legPistonGroupName = "Leg Pistons";
+string landingGearGroupName = "Piston Landing Gear";
+IMyBlockGroup legPistons;
+IMyBlockGroup landingGear;
+private void InitializePartReferences() {
+    legPistons = GridTerminalSystem.GetBlockGroupWithName(legPistonGroupName);
+    landingGear = GridTerminalSystem.GetBlockGroupWithName(landingGearGroupName);
+}
+
+IEnumerator<bool> _stateMachine;
+public void RunStateMachine() {
+    
+    if (_stateMachine != null) {
+        if (!_stateMachine.MoveNext() || !_stateMachine.Current) {
+  _stateMachine.Dispose();
+            _stateMachine = null;
+            Runtime.UpdateFrequency = UpdateFrequency.None;
+            this.Log_Debug("Workflow Complete.");
+        }
     }
+}
+
+private void KillStateMachine() {
+    _stateMachine = null;
+    Runtime.UpdateFrequency = UpdateFrequency.None;
+    this.Log_Debug("WORKFLOW KILLED!");
 }
 
 private TBlockType GetFirstBlock<TBlockType>(IMyBlockGroup group) where TBlockType : class, IMyTerminalBlock {
@@ -257,7 +293,63 @@ public void DoAll<TTerminalBlock>(Action<TTerminalBlock> action) where TTerminal
 }
 
 IMyTextSurface _textPanel;
-string _header = "Booting";
+IMyTextSurface _display1;
+MyIni config;
+public Program()
+{
+    _textPanel = Me.GetSurface(0); //GetFirstBlock<IMyCockpit>().GetSurface(0); /
+    _display1 = GridTerminalSystem.GetBlockWithName(STATUS_DISPLAY_NAME) as IMyTextSurface;
+    var ini = new MyIni();
+
+    MyIniParseResult result;
+    if (!ini.TryParse(Me.CustomData, out result)) 
+        throw new Exception(result.ToString());
+    ini.Get("global", "WheelOffsetRidingPosition").ToString();
+    // Runtime.UpdateFrequency = UpdateFrequency.Once | UpdateFrequency.Update100;
+    UpdateStatusDisplay();
+}
+
+public void Log_Debug(string message) {
+    if (!debugOutput) return;
+    
+    AppendToConsole(message);
+    OutputConsoleBuffer();
+}
+
+private void UpdateStatusDisplay() {
+    // _display1.Font = "monospace";
+    _display1.FontColor = new Color(255,255,0);
+
+    //_display1.SetValue<Single>( "FontSize", (Single)20 );  // set font size 
+    _display1.WriteText("Mode: Normal");
+    _display1.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+}
+
+IList<string> consoleBuffer = new List<string>();
+int CONSOLE_BUFFER_LENGTH = 15;
+private void AppendToConsole(string message) {
+    consoleBuffer.Add(message);
+    var bufferLength = consoleBuffer.Count();
+    if (bufferLength > CONSOLE_BUFFER_LENGTH) {
+        consoleBuffer = consoleBuffer.Skip(Math.Max(0, bufferLength - CONSOLE_BUFFER_LENGTH)).ToList();
+    }
+}
+
+private void ReplaceConsoleLine(string message) {
+    consoleBuffer = consoleBuffer.Take(Math.Max(0, consoleBuffer.Count() - 1)).Concat(new string[] { message }).ToList();
+}
+
+private string GetLastConsoleLine() {
+    var bufferLength = consoleBuffer.Count();
+    return bufferLength > 0 ? consoleBuffer[bufferLength - 1] : "";
+}
+
+private void OutputConsoleBuffer() {
+    var truncatedText = string.Join("\n", consoleBuffer);
+    _textPanel.WriteText(truncatedText, false);
+    _textPanel.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+}
+
 
 #region PreludeFooter
     }
